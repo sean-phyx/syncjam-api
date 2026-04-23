@@ -113,12 +113,15 @@ backend or server-URL metadata.
   "type": "session_created",
   "sessionId": "<uuid>",
   "inviteCode": "XYZ9QR",
+  "hostUserId": "<uuid>",
+  "hostOnly": false,
   "state": { /* SessionState */ },
   "members": [ { "userId": "...", "displayName": "..." } ]
 }
 ```
 
-The creator is automatically a member.
+The creator is automatically the host and a member. `hostOnly` starts
+false; only the host can toggle it.
 
 ### `join_session` (client → server)
 
@@ -160,6 +163,40 @@ server removes them from a session.
 
 ```json
 { "type": "session_left", "sessionId": "..." }
+```
+
+### `session_ended` (server → remaining members)
+
+Sent to all non-host members when the host leaves, which tears down the
+session. Clients should treat this like `session_left`.
+
+```json
+{ "type": "session_ended", "sessionId": "...", "reason": "host_left" }
+```
+
+## Host authority
+
+### `set_host_only` (client → server)
+
+Only the host may issue this. Others receive `error { code: "not_authorised" }`.
+
+```json
+{ "type": "set_host_only", "enabled": true }
+```
+
+When `hostOnly` is true, `play` / `pause` / `seek` / `track_change` from
+non-hosts are rejected with `error { code: "not_authorised" }`.
+
+### `session_meta_changed` (server → all members)
+
+Broadcast when `hostOnly` toggles.
+
+```json
+{
+  "type": "session_meta_changed",
+  "hostUserId": "<uuid>",
+  "hostOnly": true
+}
 ```
 
 ## Playback state

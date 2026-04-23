@@ -16,6 +16,7 @@ type inbound struct {
 	TrackID          string `json:"trackId,omitempty"`
 	PositionMs       int64  `json:"positionMs,omitempty"`
 	ClientSendTimeMs int64  `json:"clientSendTimeMs,omitempty"`
+	Enabled          bool   `json:"enabled,omitempty"`
 }
 
 // handle dispatches one authenticated inbound message to the broker.
@@ -48,6 +49,11 @@ func (c *client) handle(ctx context.Context, raw []byte) {
 
 	case "leave_session":
 		c.broker.LeaveSession(c.userID)
+
+	case "set_host_only":
+		if err := c.broker.SetHostOnly(c.userID, msg.Enabled); err != nil {
+			c.sendError(mapErrorCode(err), err.Error())
+		}
 
 	case "play":
 		playing := true
@@ -103,10 +109,13 @@ func (c *client) enqueueSessionEnvelope(kind, sessionID, inviteCode string) {
 		c.sendError("session_not_found", "session state unavailable")
 		return
 	}
+	hostUserID, hostOnly, _ := c.broker.SessionMeta(c.userID)
 	_ = c.registry.Notify(c.userID, map[string]any{
 		"type":       kind,
 		"sessionId":  sessionID,
 		"inviteCode": inviteCode,
+		"hostUserId": hostUserID,
+		"hostOnly":   hostOnly,
 		"state": map[string]any{
 			"trackId":            state.TrackID,
 			"positionMs":         state.PositionMs,

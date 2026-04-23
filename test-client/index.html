@@ -234,11 +234,16 @@ function handleServerMessage(msg) {
       applyStateToAudio();
       break;
     case "session_left":
+    case "session_ended":
       sessionId = null;
       state = null;
       members = [];
       lastInviteCode = null;
       renderSessionPill();
+      if (msg.type === "session_ended") log(`session ended: ${msg.reason || ""}`);
+      break;
+    case "session_meta_changed":
+      log(`host_only=${msg.hostOnly} host=${msg.hostUserId}`);
       break;
     case "state_changed":
       state = msg.state;

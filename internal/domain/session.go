@@ -19,6 +19,8 @@ type Member struct {
 type Session struct {
 	ID         string
 	InviteCode string
+	HostUserID string
+	HostOnly   bool
 	State      SessionState
 	Members    map[string]struct{}
 }

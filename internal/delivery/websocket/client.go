@@ -173,6 +173,8 @@ func mapErrorCode(err error) string {
 		return "session_not_found"
 	case errors.Is(err, domain.ErrNotInSession):
 		return "not_in_session"
+	case errors.Is(err, domain.ErrNotAuthorised):
+		return "not_authorised"
 	default:
 		return "backend_unreachable"
 	}

@@ -94,6 +94,7 @@ func (b *Broker) CreateSession(userID string) (*domain.Session, error) {
 	session := &domain.Session{
 		ID:         newID(),
 		InviteCode: b.freshInviteCodeLocked(),
+		HostUserID: userID,
 		State: domain.SessionState{
 			AnchorServerTimeMs: b.now().UnixMilli(),
 		},
@@ -148,7 +149,8 @@ func (b *Broker) LeaveSession(userID string) {
 }
 
 // UpdateState applies the patch, re-anchors the clock, and broadcasts
-// state_changed to every member (issuer included).
+// state_changed to every member (issuer included). Rejects when the
+// session has host-only mode enabled and the issuer is not the host.
 func (b *Broker) UpdateState(userID string, patch StatePatch) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -159,6 +161,9 @@ func (b *Broker) UpdateState(userID string, patch StatePatch) error {
 	session, ok := b.sessions[c.sessionID]
 	if !ok {
 		return domain.ErrNotInSession
+	}
+	if session.HostOnly && session.HostUserID != userID {
+		return domain.ErrNotAuthorised
 	}
 
 	if patch.TrackID != nil {
@@ -185,6 +190,50 @@ func (b *Broker) UpdateState(userID string, patch StatePatch) error {
 		})
 	}
 	return nil
+}
+
+// SetHostOnly flips the session's host-only flag. Only the session's
+// host may call. Broadcasts session_meta_changed on success.
+func (b *Broker) SetHostOnly(userID string, enabled bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.clients[userID]
+	if !ok || c.sessionID == "" {
+		return domain.ErrNotInSession
+	}
+	session, ok := b.sessions[c.sessionID]
+	if !ok {
+		return domain.ErrNotInSession
+	}
+	if session.HostUserID != userID {
+		return domain.ErrNotAuthorised
+	}
+	session.HostOnly = enabled
+
+	for mid := range session.Members {
+		_ = b.notifier.Notify(mid, map[string]any{
+			"type":       "session_meta_changed",
+			"hostUserId": session.HostUserID,
+			"hostOnly":   session.HostOnly,
+		})
+	}
+	return nil
+}
+
+// SessionMeta returns (hostUserId, hostOnly, ok) for the caller's
+// current session. ok is false if the caller isn't in a session.
+func (b *Broker) SessionMeta(userID string) (string, bool, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.clients[userID]
+	if !ok || c.sessionID == "" {
+		return "", false, false
+	}
+	session, ok := b.sessions[c.sessionID]
+	if !ok {
+		return "", false, false
+	}
+	return session.HostUserID, session.HostOnly, true
 }
 
 // StateFor returns a copy; callers may not mutate broker state.
@@ -242,12 +291,31 @@ func (b *Broker) leaveLocked(userID string) {
 	if !ok {
 		return
 	}
+	hostLeaving := session.HostUserID == userID
 	delete(session.Members, userID)
 
 	_ = b.notifier.Notify(userID, map[string]any{
 		"type":      "session_left",
 		"sessionId": sid,
 	})
+
+	if hostLeaving {
+		// Host leaving tears down the session for everyone.
+		for mid := range session.Members {
+			if mc, ok := b.clients[mid]; ok {
+				mc.sessionID = ""
+			}
+			_ = b.notifier.Notify(mid, map[string]any{
+				"type":      "session_ended",
+				"sessionId": sid,
+				"reason":    "host_left",
+			})
+		}
+		delete(b.sessions, sid)
+		delete(b.codeIndex, session.InviteCode)
+		return
+	}
+
 	for mid := range session.Members {
 		_ = b.notifier.Notify(mid, map[string]any{
 			"type":   "member_left",

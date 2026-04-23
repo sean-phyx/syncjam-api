@@ -10,4 +10,5 @@ var (
 	ErrSessionNotFound    = errors.New("session_not_found")
 	ErrNotInSession       = errors.New("not_in_session")
 	ErrClientNotFound     = errors.New("client_not_found")
+	ErrNotAuthorised      = errors.New("not_authorised")
 )
