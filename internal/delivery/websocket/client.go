@@ -50,6 +50,7 @@ func (c *client) run(ctx context.Context) {
 	writerCtx, cancelWriter := context.WithCancel(ctx)
 	defer cancelWriter()
 	go c.writer(writerCtx)
+	go c.keepalive(writerCtx)
 
 	for {
 		_, data, err := c.conn.Read(ctx)
@@ -57,6 +58,29 @@ func (c *client) run(ctx context.Context) {
 			return
 		}
 		c.handle(ctx, data)
+	}
+}
+
+// keepalive sends WebSocket-level PING frames so middleboxes don't
+// close the connection as idle. Application-level clock_pings are JSON,
+// invisible to proxies as keepalive signals.
+func (c *client) keepalive(ctx context.Context) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := c.conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				log.Printf("[ws] keepalive ping failed: %v", err)
+				_ = c.conn.Close(websocket.StatusGoingAway, "ping timeout")
+				return
+			}
+		}
 	}
 }
 

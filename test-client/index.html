@@ -147,16 +147,22 @@ let ws = null;
 let sessionId = null;
 let state = null;   // SessionState
 let myUserId = null;
+let members = [];            // [{userId, displayName}]
+let lastInviteCode = null;   // remembered for reconnect
+let reconnectAttempt = 0;
+let manualDisconnect = false;
 
 // Clock offset stats: sliding window of samples, use median.
 let offsetSamples = [];
 let clockOffsetMs = 0;
 
 function connect() {
+  manualDisconnect = false;
   const url = $("wsUrl").value.trim();
   ws = new WebSocket(url);
   ws.addEventListener("open", () => {
     log("ws open");
+    reconnectAttempt = 0;
     const salt = Math.random().toString(36).slice(2, 10);
     const token = md5($("password").value + salt);
     ws.send(JSON.stringify({
@@ -169,8 +175,31 @@ function connect() {
     log("←", msg);
     handleServerMessage(msg);
   });
-  ws.addEventListener("close", () => log("ws closed"));
+  ws.addEventListener("close", () => {
+    log("ws closed");
+    $("authState").textContent = "disconnected";
+    $("authState").className = "pill err";
+    if (!manualDisconnect) scheduleReconnect();
+  });
   ws.addEventListener("error", (e) => log("ws error", e));
+}
+
+function scheduleReconnect() {
+  const delay = Math.min(30000, 500 * Math.pow(2, reconnectAttempt));
+  reconnectAttempt++;
+  log(`reconnect in ${delay}ms (attempt ${reconnectAttempt})`);
+  setTimeout(connect, delay);
+}
+
+function renderSessionPill() {
+  if (!sessionId) {
+    $("sessionState").textContent = "none";
+    $("sessionState").className = "pill";
+    return;
+  }
+  const n = members.length;
+  $("sessionState").textContent = `${lastInviteCode} (${n} member${n === 1 ? "" : "s"})`;
+  $("sessionState").className = "pill ok";
 }
 
 function send(msg) {
@@ -186,6 +215,10 @@ function handleServerMessage(msg) {
       $("authState").textContent = `authed as ${msg.displayName}`;
       $("authState").className = "pill ok";
       startClockLoop();
+      // Reconnect path: rejoin last session if we had one
+      if (lastInviteCode && !sessionId) {
+        send({ type: "join_session", inviteCode: lastInviteCode });
+      }
       break;
     case "error":
       $("authState").textContent = `error: ${msg.code}`;
@@ -195,9 +228,17 @@ function handleServerMessage(msg) {
     case "session_joined":
       sessionId = msg.sessionId;
       state = msg.state;
-      $("sessionState").textContent = `${msg.type} ${msg.inviteCode} (${msg.members.length} member${msg.members.length===1?"":"s"})`;
-      $("sessionState").className = "pill ok";
+      members = msg.members.slice();
+      lastInviteCode = msg.inviteCode;
+      renderSessionPill();
       applyStateToAudio();
+      break;
+    case "session_left":
+      sessionId = null;
+      state = null;
+      members = [];
+      lastInviteCode = null;
+      renderSessionPill();
       break;
     case "state_changed":
       state = msg.state;
@@ -205,10 +246,12 @@ function handleServerMessage(msg) {
       applyStateToAudio();
       break;
     case "member_joined":
-      log("member_joined", msg.displayName);
+      members.push({ userId: msg.userId, displayName: msg.displayName });
+      renderSessionPill();
       break;
     case "member_left":
-      log("member_left", msg.userId);
+      members = members.filter(m => m.userId !== msg.userId);
+      renderSessionPill();
       break;
     case "clock_pong": {
       const clientRecv = Date.now();

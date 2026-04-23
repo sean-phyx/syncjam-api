@@ -244,6 +244,10 @@ func (b *Broker) leaveLocked(userID string) {
 	}
 	delete(session.Members, userID)
 
+	_ = b.notifier.Notify(userID, map[string]any{
+		"type":      "session_left",
+		"sessionId": sid,
+	})
 	for mid := range session.Members {
 		_ = b.notifier.Notify(mid, map[string]any{
 			"type":   "member_left",

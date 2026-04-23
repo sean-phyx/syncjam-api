@@ -153,6 +153,15 @@ When the last member leaves, the session is destroyed.
 { "type": "leave_session" }
 ```
 
+### `session_left` (server → leaving client)
+
+Sent to the client that issued `leave_session`, or implicitly when the
+server removes them from a session.
+
+```json
+{ "type": "session_left", "sessionId": "..." }
+```
+
 ## Playback state
 
 ### SessionState payload
