@@ -201,6 +201,7 @@ function handleServerMessage(msg) {
       break;
     case "state_changed":
       state = msg.state;
+      if (Date.now() < suppressEchoUntil) break;
       applyStateToAudio();
       break;
     case "member_joined":
@@ -260,19 +261,24 @@ function tick() {
 }
 tick();
 
-// Local audio events → server
-let suppressEmit = false;
+// Drop state_changed echoes of our own mutations for this window (ms)
+let suppressEchoUntil = 0;
+function localMutation(msg) {
+  suppressEchoUntil = Date.now() + 600;
+  send(msg);
+}
+
 audio.addEventListener("play", () => {
-  if (suppressEmit || !sessionId) return;
-  send({ type: "play", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId) return;
+  localMutation({ type: "play", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 audio.addEventListener("pause", () => {
-  if (suppressEmit || !sessionId) return;
-  send({ type: "pause", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId) return;
+  localMutation({ type: "pause", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 audio.addEventListener("seeked", () => {
-  if (suppressEmit || !sessionId) return;
-  send({ type: "seek", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId) return;
+  localMutation({ type: "seek", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 
 // ----- UI wiring -----
