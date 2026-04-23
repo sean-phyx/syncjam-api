@@ -201,7 +201,7 @@ function handleServerMessage(msg) {
       break;
     case "state_changed":
       state = msg.state;
-      if (Date.now() < suppressEchoUntil) break;
+      if (msg.issuedBy === myUserId) break;
       applyStateToAudio();
       break;
     case "member_joined":
@@ -243,12 +243,13 @@ function currentPosFromState() {
   return state.positionMs + (serverNow - state.anchorServerTimeMs);
 }
 
+let applyingServerStateUntil = 0;
 function applyStateToAudio() {
   if (!state) return;
   const targetSec = currentPosFromState() / 1000;
-  const driftSec = Math.abs(audio.currentTime - targetSec);
-  // Tolerate small drift to avoid audible stutters on every state_changed
-  if (driftSec > 0.25) audio.currentTime = targetSec;
+  // 1.5s covers buffering-induced pause/seeked events after the mutation
+  applyingServerStateUntil = Date.now() + 1500;
+  audio.currentTime = targetSec;
   if (state.playing && audio.paused) audio.play().catch(() => {});
   if (!state.playing && !audio.paused) audio.pause();
 }
@@ -261,24 +262,19 @@ function tick() {
 }
 tick();
 
-// Drop state_changed echoes of our own mutations for this window (ms)
-let suppressEchoUntil = 0;
-function localMutation(msg) {
-  suppressEchoUntil = Date.now() + 600;
-  send(msg);
-}
+function isApplyingServerState() { return Date.now() < applyingServerStateUntil; }
 
 audio.addEventListener("play", () => {
-  if (!sessionId) return;
-  localMutation({ type: "play", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId || isApplyingServerState()) return;
+  send({ type: "play", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 audio.addEventListener("pause", () => {
-  if (!sessionId) return;
-  localMutation({ type: "pause", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId || isApplyingServerState()) return;
+  send({ type: "pause", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 audio.addEventListener("seeked", () => {
-  if (!sessionId) return;
-  localMutation({ type: "seek", positionMs: Math.floor(audio.currentTime * 1000) });
+  if (!sessionId || isApplyingServerState()) return;
+  send({ type: "seek", positionMs: Math.floor(audio.currentTime * 1000) });
 });
 
 // ----- UI wiring -----
