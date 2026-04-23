@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SyncJam test client</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.2rem; }
+    section { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    label { display: block; font-size: 0.85rem; margin: 0.25rem 0 0.1rem; color: #555; }
+    input, button, textarea { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+    input[type=text], input[type=url], textarea { width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; background: #fafafa; }
+    button:hover { background: #f0f0f0; }
+    .row { display: flex; gap: 0.5rem; align-items: center; margin: 0.25rem 0; }
+    #log { font-family: monospace; font-size: 0.75rem; background: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; height: 240px; overflow-y: scroll; }
+    .pill { display: inline-block; padding: 0.1rem 0.4rem; background: #eee; border-radius: 10px; font-size: 0.75rem; margin-left: 0.3rem; }
+    .ok { background: #d8f3d8; }
+    .err { background: #f8d8d8; }
+  </style>
+</head>
+<body>
+  <h1>SyncJam test client</h1>
+  <p style="font-size: 0.85rem; color: #555;">
+    Two-tab smoke test. Open this page in two tabs, authenticate, create a session in one,
+    paste the invite code into the other, then play/pause/seek the &lt;audio&gt; element to
+    watch the state propagate and the clock offset settle.
+  </p>
+
+  <section>
+    <strong>Connect</strong>
+    <label>SyncJam WS URL</label>
+    <input id="wsUrl" type="url" value="ws://localhost:8787/ws" />
+    <label>Username</label>
+    <input id="username" type="text" />
+    <label>Password (derives token locally, never sent)</label>
+    <input id="password" type="text" />
+    <div class="row">
+      <button id="connect">Connect & hello</button>
+      <span id="authState" class="pill">idle</span>
+    </div>
+    <p style="font-size: 0.75rem; color: #888; margin: 0.5rem 0 0;">
+      SyncJam auths against the Subsonic server it was deployed with
+      (see <code>SUBSONIC_URL</code> env var); no URL field here.
+    </p>
+  </section>
+
+  <section>
+    <strong>Session</strong>
+    <div class="row">
+      <button id="create">Create session</button>
+      <button id="leave">Leave</button>
+      <span id="sessionState" class="pill">none</span>
+    </div>
+    <label>Join by invite code</label>
+    <div class="row">
+      <input id="joinCode" type="text" style="text-transform: uppercase; max-width: 6rem;" maxlength="6" />
+      <button id="join">Join</button>
+    </div>
+  </section>
+
+  <section>
+    <strong>Playback</strong>
+    <label>Audio URL (any MP3/OGG — the sync itself is track-agnostic)</label>
+    <input id="audioUrl" type="url" value="https://upload.wikimedia.org/wikipedia/commons/6/6c/Wikipedia-en-abstract.ogg" />
+    <div class="row">
+      <button id="loadAudio">Load</button>
+      <audio id="audio" controls style="flex:1;"></audio>
+    </div>
+    <div class="row" style="font-size: 0.8rem; color: #555;">
+      <span>clockOffset: <span id="offset">–</span> ms</span>
+      <span style="margin-left: 1rem;">derived playhead: <span id="derived">–</span> ms</span>
+    </div>
+  </section>
+
+  <section>
+    <strong>Log</strong>
+    <div id="log"></div>
+  </section>
+
+<script>
+// ----- utilities -----
+const $ = (id) => document.getElementById(id);
+const log = (...args) => {
+  const el = $("log");
+  const line = document.createElement("div");
+  line.textContent = `[${new Date().toLocaleTimeString()}] ` + args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+};
+
+// ----- Subsonic auth hash (md5(password + salt)) -----
+// Using SubtleCrypto would mean SHA-256; Subsonic wants MD5, which
+// SubtleCrypto doesn't support. Small MD5 implementation inline.
+function md5(str) {
+  // Tiny MD5 — standard implementation; ~80 lines.
+  function cmn(q, a, b, x, s, t) {
+    a = (((a + q) | 0) + ((x + t) | 0)) | 0;
+    return (((a << s) | (a >>> (32 - s))) + b) | 0;
+  }
+  function ff(a,b,c,d,x,s,t){return cmn((b&c)|((~b)&d),a,b,x,s,t);}
+  function gg(a,b,c,d,x,s,t){return cmn((b&d)|(c&(~d)),a,b,x,s,t);}
+  function hh(a,b,c,d,x,s,t){return cmn(b^c^d,a,b,x,s,t);}
+  function ii(a,b,c,d,x,s,t){return cmn(c^(b|(~d)),a,b,x,s,t);}
+  function toBytes(str){
+    const utf8 = unescape(encodeURIComponent(str));
+    const arr = [];
+    for (let i = 0; i < utf8.length; i++) arr.push(utf8.charCodeAt(i));
+    return arr;
+  }
+  const bytes = toBytes(str);
+  const n = bytes.length;
+  const words = new Array(((n + 8) >> 6) * 16 + 16).fill(0);
+  for (let i = 0; i < n; i++) words[i >> 2] |= bytes[i] << ((i % 4) * 8);
+  words[n >> 2] |= 0x80 << ((n % 4) * 8);
+  words[words.length - 2] = n * 8;
+  let a = 0x67452301, b = -0x10325477, c = -0x67452302, d = 0x10325476;
+  for (let i = 0; i < words.length; i += 16) {
+    const oa=a, ob=b, oc=c, od=d;
+    a=ff(a,b,c,d,words[i+0],7,-680876936);d=ff(d,a,b,c,words[i+1],12,-389564586);c=ff(c,d,a,b,words[i+2],17,606105819);b=ff(b,c,d,a,words[i+3],22,-1044525330);
+    a=ff(a,b,c,d,words[i+4],7,-176418897);d=ff(d,a,b,c,words[i+5],12,1200080426);c=ff(c,d,a,b,words[i+6],17,-1473231341);b=ff(b,c,d,a,words[i+7],22,-45705983);
+    a=ff(a,b,c,d,words[i+8],7,1770035416);d=ff(d,a,b,c,words[i+9],12,-1958414417);c=ff(c,d,a,b,words[i+10],17,-42063);b=ff(b,c,d,a,words[i+11],22,-1990404162);
+    a=ff(a,b,c,d,words[i+12],7,1804603682);d=ff(d,a,b,c,words[i+13],12,-40341101);c=ff(c,d,a,b,words[i+14],17,-1502002290);b=ff(b,c,d,a,words[i+15],22,1236535329);
+    a=gg(a,b,c,d,words[i+1],5,-165796510);d=gg(d,a,b,c,words[i+6],9,-1069501632);c=gg(c,d,a,b,words[i+11],14,643717713);b=gg(b,c,d,a,words[i+0],20,-373897302);
+    a=gg(a,b,c,d,words[i+5],5,-701558691);d=gg(d,a,b,c,words[i+10],9,38016083);c=gg(c,d,a,b,words[i+15],14,-660478335);b=gg(b,c,d,a,words[i+4],20,-405537848);
+    a=gg(a,b,c,d,words[i+9],5,568446438);d=gg(d,a,b,c,words[i+14],9,-1019803690);c=gg(c,d,a,b,words[i+3],14,-187363961);b=gg(b,c,d,a,words[i+8],20,1163531501);
+    a=gg(a,b,c,d,words[i+13],5,-1444681467);d=gg(d,a,b,c,words[i+2],9,-51403784);c=gg(c,d,a,b,words[i+7],14,1735328473);b=gg(b,c,d,a,words[i+12],20,-1926607734);
+    a=hh(a,b,c,d,words[i+5],4,-378558);d=hh(d,a,b,c,words[i+8],11,-2022574463);c=hh(c,d,a,b,words[i+11],16,1839030562);b=hh(b,c,d,a,words[i+14],23,-35309556);
+    a=hh(a,b,c,d,words[i+1],4,-1530992060);d=hh(d,a,b,c,words[i+4],11,1272893353);c=hh(c,d,a,b,words[i+7],16,-155497632);b=hh(b,c,d,a,words[i+10],23,-1094730640);
+    a=hh(a,b,c,d,words[i+13],4,681279174);d=hh(d,a,b,c,words[i+0],11,-358537222);c=hh(c,d,a,b,words[i+3],16,-722521979);b=hh(b,c,d,a,words[i+6],23,76029189);
+    a=hh(a,b,c,d,words[i+9],4,-640364487);d=hh(d,a,b,c,words[i+12],11,-421815835);c=hh(c,d,a,b,words[i+15],16,530742520);b=hh(b,c,d,a,words[i+2],23,-995338651);
+    a=ii(a,b,c,d,words[i+0],6,-198630844);d=ii(d,a,b,c,words[i+7],10,1126891415);c=ii(c,d,a,b,words[i+14],15,-1416354905);b=ii(b,c,d,a,words[i+5],21,-57434055);
+    a=ii(a,b,c,d,words[i+12],6,1700485571);d=ii(d,a,b,c,words[i+3],10,-1894986606);c=ii(c,d,a,b,words[i+10],15,-1051523);b=ii(b,c,d,a,words[i+1],21,-2054922799);
+    a=ii(a,b,c,d,words[i+8],6,1873313359);d=ii(d,a,b,c,words[i+15],10,-30611744);c=ii(c,d,a,b,words[i+6],15,-1560198380);b=ii(b,c,d,a,words[i+13],21,1309151649);
+    a=ii(a,b,c,d,words[i+4],6,-145523070);d=ii(d,a,b,c,words[i+11],10,-1120210379);c=ii(c,d,a,b,words[i+2],15,718787259);b=ii(b,c,d,a,words[i+9],21,-343485551);
+    a=(a+oa)|0;b=(b+ob)|0;c=(c+oc)|0;d=(d+od)|0;
+  }
+  return [a,b,c,d].map(x => {
+    let s = "";
+    for (let i = 0; i < 4; i++) s += ((x >> (i*8)) & 0xff).toString(16).padStart(2, "0");
+    return s;
+  }).join("");
+}
+
+// ----- connection -----
+let ws = null;
+let sessionId = null;
+let state = null;   // SessionState
+let myUserId = null;
+
+// Clock offset stats: sliding window of samples, use median.
+let offsetSamples = [];
+let clockOffsetMs = 0;
+
+function connect() {
+  const url = $("wsUrl").value.trim();
+  ws = new WebSocket(url);
+  ws.addEventListener("open", () => {
+    log("ws open");
+    const salt = Math.random().toString(36).slice(2, 10);
+    const token = md5($("password").value + salt);
+    ws.send(JSON.stringify({
+      type: "hello",
+      auth: { username: $("username").value.trim(), token, salt },
+    }));
+  });
+  ws.addEventListener("message", (e) => {
+    const msg = JSON.parse(e.data);
+    log("←", msg);
+    handleServerMessage(msg);
+  });
+  ws.addEventListener("close", () => log("ws closed"));
+  ws.addEventListener("error", (e) => log("ws error", e));
+}
+
+function send(msg) {
+  if (!ws || ws.readyState !== ws.OPEN) return;
+  log("→", msg);
+  ws.send(JSON.stringify(msg));
+}
+
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case "hello_ack":
+      myUserId = msg.userId;
+      $("authState").textContent = `authed as ${msg.displayName}`;
+      $("authState").className = "pill ok";
+      startClockLoop();
+      break;
+    case "error":
+      $("authState").textContent = `error: ${msg.code}`;
+      $("authState").className = "pill err";
+      break;
+    case "session_created":
+    case "session_joined":
+      sessionId = msg.sessionId;
+      state = msg.state;
+      $("sessionState").textContent = `${msg.type} ${msg.inviteCode} (${msg.members.length} member${msg.members.length===1?"":"s"})`;
+      $("sessionState").className = "pill ok";
+      applyStateToAudio();
+      break;
+    case "state_changed":
+      state = msg.state;
+      applyStateToAudio();
+      break;
+    case "member_joined":
+      log("member_joined", msg.displayName);
+      break;
+    case "member_left":
+      log("member_left", msg.userId);
+      break;
+    case "clock_pong": {
+      const clientRecv = Date.now();
+      const roundTrip = clientRecv - msg.clientSendTimeMs;
+      if (roundTrip > 2000) break;
+      const serverMid = (msg.serverRecvTimeMs + msg.serverSendTimeMs) / 2;
+      const clientMid = (msg.clientSendTimeMs + clientRecv) / 2;
+      const offset = serverMid - clientMid;
+      offsetSamples.push(offset);
+      if (offsetSamples.length > 11) offsetSamples.shift();
+      const sorted = [...offsetSamples].sort((a, b) => a - b);
+      clockOffsetMs = sorted[Math.floor(sorted.length / 2)];
+      $("offset").textContent = clockOffsetMs.toFixed(0);
+      break;
+    }
+  }
+}
+
+function startClockLoop() {
+  setInterval(() => {
+    send({ type: "clock_ping", clientSendTimeMs: Date.now() });
+  }, 3000);
+}
+
+// ----- audio <-> state sync -----
+const audio = $("audio");
+
+function currentPosFromState() {
+  if (!state) return 0;
+  if (!state.playing) return state.positionMs;
+  const serverNow = Date.now() + clockOffsetMs;
+  return state.positionMs + (serverNow - state.anchorServerTimeMs);
+}
+
+function applyStateToAudio() {
+  if (!state) return;
+  const targetSec = currentPosFromState() / 1000;
+  const driftSec = Math.abs(audio.currentTime - targetSec);
+  // Tolerate small drift to avoid audible stutters on every state_changed
+  if (driftSec > 0.25) audio.currentTime = targetSec;
+  if (state.playing && audio.paused) audio.play().catch(() => {});
+  if (!state.playing && !audio.paused) audio.pause();
+}
+
+// Re-apply state on each frame so the display number updates and the
+// audio stays within drift tolerance without user interaction.
+function tick() {
+  $("derived").textContent = currentPosFromState().toFixed(0);
+  requestAnimationFrame(tick);
+}
+tick();
+
+// Local audio events → server
+let suppressEmit = false;
+audio.addEventListener("play", () => {
+  if (suppressEmit || !sessionId) return;
+  send({ type: "play", positionMs: Math.floor(audio.currentTime * 1000) });
+});
+audio.addEventListener("pause", () => {
+  if (suppressEmit || !sessionId) return;
+  send({ type: "pause", positionMs: Math.floor(audio.currentTime * 1000) });
+});
+audio.addEventListener("seeked", () => {
+  if (suppressEmit || !sessionId) return;
+  send({ type: "seek", positionMs: Math.floor(audio.currentTime * 1000) });
+});
+
+// ----- UI wiring -----
+$("connect").addEventListener("click", connect);
+$("create").addEventListener("click", () => send({ type: "create_session" }));
+$("join").addEventListener("click", () => {
+  const code = $("joinCode").value.trim().toUpperCase();
+  if (code) send({ type: "join_session", inviteCode: code });
+});
+$("leave").addEventListener("click", () => send({ type: "leave_session" }));
+$("loadAudio").addEventListener("click", () => {
+  audio.src = $("audioUrl").value.trim();
+  if (sessionId) {
+    send({ type: "track_change", trackId: audio.src, positionMs: 0 });
+  }
+});
+</script>
+</body>
+</html>

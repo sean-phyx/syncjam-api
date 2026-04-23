@@ -1,0 +1,25 @@
+services:
+    navidrome:
+        image: deluan/navidrome:latest
+        container_name: navidrome
+        ports:
+            - "4533:4533"
+        volumes:
+            - ./navidrome-data:/data
+            - /path/to/your/music:/music:ro
+        environment:
+            ND_LOGLEVEL: info
+            ND_SCANSCHEDULE: "1h"
+        restart: unless-stopped
+
+    syncjam:
+        build: .
+        container_name: syncjam
+        ports:
+            - "8787:8787"
+        environment:
+            PORT: "8787"
+            SUBSONIC_URL: "http://navidrome:4533"
+        depends_on:
+            - navidrome
+        restart: unless-stopped

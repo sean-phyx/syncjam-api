@@ -1,0 +1,60 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - |
+      mkdir -p /kaniko/.docker
+      cat > /kaniko/.docker/config.json <<EOF
+      {
+        "auths": {
+          "$CI_REGISTRY": {
+            "username": "$CI_REGISTRY_USER",
+            "password": "$CI_REGISTRY_PASSWORD"
+          }
+        }
+      }
+      EOF
+    - |
+      DESTS="--destination=$IMAGE:$CI_COMMIT_SHORT_SHA"
+      if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
+        DESTS="$DESTS --destination=$IMAGE:latest"
+      fi
+      /kaniko/executor \
+        --context "$CI_PROJECT_DIR" \
+        --dockerfile "$CI_PROJECT_DIR/Dockerfile" \
+        $DESTS
+
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+  variables:
+    DEPLOY_COMPOSE_FILE: docker-compose.yml
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H "$DEPLOY_SSH_HOST" >> ~/.ssh/known_hosts
+  script:
+    - |
+      ssh "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" "
+        set -e
+        echo '$REGISTRY_PULL_PASSWORD' | docker login '$REGISTRY_HOST' -u '$REGISTRY_PULL_USER' --password-stdin
+        cd '$DEPLOY_PATH'
+        docker compose -f '$DEPLOY_COMPOSE_FILE' --env-file .env pull '$DEPLOY_SERVICE'
+        docker compose -f '$DEPLOY_COMPOSE_FILE' --env-file .env up -d '$DEPLOY_SERVICE'
+        sleep 3
+        docker ps | grep -q '$DEPLOY_SERVICE' && echo 'Deploy OK' || { docker logs '$DEPLOY_SERVICE' --tail 20 2>&1; exit 1; }
+      "
